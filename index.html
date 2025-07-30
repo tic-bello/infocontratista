@@ -9,6 +9,65 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        let app;
+        let db;
+        let auth;
+        let userId;
+
+        // Initialize Firebase and set up auth listener
+        window.onload = async () => {
+            try {
+                if (Object.keys(firebaseConfig).length > 0) {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            console.log('Usuario autenticado:', userId);
+                            // Now that we have userId, proceed with app initialization
+                            document.dispatchEvent(new CustomEvent('firebaseReady'));
+                        } else {
+                            console.log('No user signed in. Signing in anonymously...');
+                            try {
+                                if (typeof __initial_auth_token !== 'undefined') {
+                                    await signInWithCustomToken(auth, __initial_auth_token);
+                                } else {
+                                    await signInAnonymously(auth);
+                                }
+                            } catch (error) {
+                                console.error("Error al iniciar sesión anónimamente o con token:", error);
+                                userId = crypto.randomUUID(); // Fallback to random ID if auth fails
+                                document.dispatchEvent(new CustomEvent('firebaseReady')); // Proceed even if auth fails
+                            }
+                        }
+                    });
+                } else {
+                    console.warn("Firebase config not found. Running in localStorage mode.");
+                    userId = crypto.randomUUID(); // Generate a random ID for localStorage mode
+                    document.dispatchEvent(new CustomEvent('firebaseReady')); // Proceed without Firebase
+                }
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                userId = crypto.randomUUID(); // Fallback to random ID if Firebase init fails
+                document.dispatchEvent(new CustomEvent('firebaseReady')); // Proceed without Firebase
+            }
+        };
+
+        // Make db, auth, userId available globally or via events
+        window.getFirebase = () => ({ db, auth, userId, appId });
+    </script>
     <!-- Chosen Palette: Warm Neutrals & Professional Blue -->
     <!-- Application Structure Plan: Se ha diseñado una aplicación de panel de control (dashboard) orientada a tareas. El flujo principal permite al usuario seleccionar una fecha y registrar el trabajo en tarjetas interactivas que representan cada obligación contractual. Esta estructura es superior a un formulario estático porque separa la entrada de datos (diaria y granular) de la salida (informes consolidados) y añade valor con una visualización del progreso. Permite una interacción más rápida y ofrece una visión general inmediata, mejorando la usabilidad para el contratista y la supervisión para la administración. -->
     <!-- Visualization & Content Choices: Report Info: Seguimiento de 5 actividades contractuales. -> Goal: Registrar el trabajo diario y comparar el esfuerzo entre tareas. -> Viz/Presentation Method: Tarjetas interactivas para la entrada de datos y un gráfico de barras horizontales para la comparación. -> Interaction: El usuario marca las tareas realizadas, añade descripciones y el gráfico se actualiza para mostrar la frecuencia de cada actividad. -> Justification: Las tarjetas simplifican el registro diario. El gráfico de barras es ideal para comparar la distribución del trabajo entre un número fijo de categorías. -> Library/Method: HTML/Tailwind para las tarjetas, Chart.js (Canvas) para el gráfico. -->
@@ -37,6 +96,36 @@
         .modal-content {
             transition: transform 0.25s ease;
         }
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            transition: opacity 0.3s ease;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .loading-overlay.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800">
@@ -46,6 +135,7 @@
         <header class="mb-8 text-center">
             <h1 class="text-3xl md:text-4xl font-bold text-slate-900">Seguimiento de Actividades del Contratista</h1>
             <p class="mt-2 text-slate-600">Plataforma para el registro y consulta del trabajo diario.</p>
+            <p id="userIdDisplay" class="mt-2 text-xs text-slate-400">ID de Usuario: Cargando...</p>
         </header>
 
         <main>
@@ -110,122 +200,197 @@
         </div>
     </div>
 
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const activities = [
-                { id: 1, title: 'Toma física de inventarios', description: 'Apoyar la toma física de inventarios de los bienes tecnológicos de la Administración Municipal e Instituciones Educativas.' },
-                { id: 2, title: 'Generación de informes de estado', description: 'Consignar la generación y elaboración de informes del estado de los equipos tecnológicos.' },
-                { id: 3, title: 'Verificación de equipos', description: 'Ayudar en la verificación de las condiciones físicas y funcionales de los equipos tecnológicos entregados.' },
-                { id: 4, title: 'Gestión de inventario', description: 'Establecer la información relacionada con el inventario de equipos tecnológicos bajo custodia de Logística.' },
-                { id: 5, title: 'Preparación informe final', description: 'Presentar al final del contrato informe escrito sobre todas las actividades realizadas.' }
-            ];
+    <div id="loadingOverlay" class="loading-overlay">
+        <div class="spinner"></div>
+    </div>
 
-            let dailyLogs = JSON.parse(localStorage.getItem('dailyLogs')) || {};
-            let activityChart;
+    <script type="module">
+        const activities = [
+            { id: 1, title: 'Toma física de inventarios', description: 'Apoyar la toma física de inventarios de los bienes tecnológicos de la Administración Municipal e Instituciones Educativas.' },
+            { id: 2, title: 'Generación de informes de estado', description: 'Consignar la generación y elaboración de informes del estado de los equipos tecnológicos.' },
+            { id: 3, title: 'Verificación de equipos', description: 'Ayudar en la verificación de las condiciones físicas y funcionales de los equipos tecnológicos entregados.' },
+            { id: 4, title: 'Gestión de inventario', description: 'Establecer la información relacionada con el inventario de equipos tecnológicos bajo custodia de Logística.' },
+            { id: 5, title: 'Preparación informe final', description: 'Presentar al final del contrato informe escrito sobre todas las actividades realizadas.' }
+        ];
 
-            const reportDateInput = document.getElementById('reportDate');
-            const activityCardsContainer = document.getElementById('activity-cards');
-            const observationsText = document.getElementById('observationsText');
-            const saveButton = document.getElementById('saveButton');
-            const generateReportButton = document.getElementById('generateReportButton');
-            const modal = document.getElementById('reportModal');
-            const closeModalButton = document.getElementById('closeModalButton');
-            const printReportButton = document.getElementById('printReportButton');
-            const modalBody = document.getElementById('modal-body');
+        let activityChart;
+        let db, auth, userId, appId; // Declare these at the top level of the module script
 
-            const initializeApp = () => {
-                const today = new Date().toISOString().split('T')[0];
-                reportDateInput.value = today;
-                renderActivityCards();
-                loadDataForDate(today);
-                renderChart();
-            };
-            
-            const renderActivityCards = () => {
-                activityCardsContainer.innerHTML = '';
-                activities.forEach(activity => {
-                    const card = document.createElement('div');
-                    card.className = 'bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col';
-                    card.innerHTML = `
-                        <div class="flex items-start gap-4 mb-3">
-                            <input type="checkbox" id="activity-check-${activity.id}" data-id="${activity.id}" class="mt-1 h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
-                            <div class="flex-1">
-                                <h3 class="font-bold text-lg text-slate-800">${activity.title}</h3>
-                                <p class="text-sm text-slate-500">${activity.description}</p>
-                            </div>
+        const reportDateInput = document.getElementById('reportDate');
+        const activityCardsContainer = document.getElementById('activity-cards');
+        const observationsText = document.getElementById('observationsText');
+        const saveButton = document.getElementById('saveButton');
+        const generateReportButton = document.getElementById('generateReportButton');
+        const modal = document.getElementById('reportModal');
+        const closeModalButton = document.getElementById('closeModalButton');
+        const printReportButton = document.getElementById('printReportButton');
+        const modalBody = document.getElementById('modal-body');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const userIdDisplay = document.getElementById('userIdDisplay');
+
+        const showLoading = () => loadingOverlay.classList.add('visible');
+        const hideLoading = () => loadingOverlay.classList.remove('visible');
+
+        // Function to get Firebase instances after initialization
+        const getFirebaseInstances = () => {
+            const firebaseGlobals = window.getFirebase();
+            db = firebaseGlobals.db;
+            auth = firebaseGlobals.auth;
+            userId = firebaseGlobals.userId;
+            appId = firebaseGlobals.appId;
+            userIdDisplay.textContent = `ID de Usuario: ${userId}`;
+        };
+
+        const initializeApp = async () => {
+            getFirebaseInstances(); // Get instances after Firebase is ready
+            const today = new Date().toISOString().split('T')[0];
+            reportDateInput.value = today;
+            renderActivityCards();
+            await loadDataForDate(today); // Await data loading from Firestore
+            renderChart();
+        };
+        
+        const renderActivityCards = () => {
+            activityCardsContainer.innerHTML = '';
+            activities.forEach(activity => {
+                const card = document.createElement('div');
+                card.className = 'bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col';
+                card.innerHTML = `
+                    <div class="flex items-start gap-4 mb-3">
+                        <input type="checkbox" id="activity-check-${activity.id}" data-id="${activity.id}" class="mt-1 h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                        <div class="flex-1">
+                            <h3 class="font-bold text-lg text-slate-800">${activity.title}</h3>
+                            <p class="text-sm text-slate-500">${activity.description}</p>
                         </div>
-                        <div class="flex-grow flex flex-col">
-                           <textarea id="activity-desc-${activity.id}" data-id="${activity.id}" class="w-full bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 flex-grow" rows="3" placeholder="Detalle las tareas específicas realizadas..." disabled></textarea>
-                        </div>
-                    `;
-                    activityCardsContainer.appendChild(card);
-                });
-                addCardEventListeners();
-            };
+                    </div>
+                    <div class="flex-grow flex flex-col">
+                       <textarea id="activity-desc-${activity.id}" data-id="${activity.id}" class="w-full bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-3 flex-grow" rows="3" placeholder="Detalle las tareas específicas realizadas..." disabled></textarea>
+                    </div>
+                `;
+                activityCardsContainer.appendChild(card);
+            });
+            addCardEventListeners();
+        };
 
-            const addCardEventListeners = () => {
-                activities.forEach(activity => {
-                    const checkbox = document.getElementById(`activity-check-${activity.id}`);
-                    const textarea = document.getElementById(`activity-desc-${activity.id}`);
-                    checkbox.addEventListener('change', () => {
-                        textarea.disabled = !checkbox.checked;
-                        if (!checkbox.checked) {
-                            textarea.value = '';
-                        }
-                    });
+        const addCardEventListeners = () => {
+            activities.forEach(activity => {
+                const checkbox = document.getElementById(`activity-check-${activity.id}`);
+                const textarea = document.getElementById(`activity-desc-${activity.id}`);
+                checkbox.addEventListener('change', () => {
+                    textarea.disabled = !checkbox.checked;
+                    if (!checkbox.checked) {
+                        textarea.value = '';
+                    }
                 });
-            };
-            
-            const loadDataForDate = (date) => {
-                const log = dailyLogs[date] || {};
+            });
+        };
+        
+        const loadDataForDate = async (date) => {
+            showLoading();
+            if (!db || !userId || !appId) {
+                console.warn("Firestore not initialized or userId/appId missing. Using localStorage fallback.");
+                const log = JSON.parse(localStorage.getItem('dailyLogs'))?.[date] || {};
                 const activityData = log.activities || {};
-
                 activities.forEach(activity => {
                     const checkbox = document.getElementById(`activity-check-${activity.id}`);
                     const textarea = document.getElementById(`activity-desc-${activity.id}`);
                     const data = activityData[activity.id] || { checked: false, description: '' };
-                    
                     checkbox.checked = data.checked;
                     textarea.value = data.description;
                     textarea.disabled = !data.checked;
                 });
-                
                 observationsText.value = log.observations || '';
-            };
+                hideLoading();
+                return;
+            }
 
-            const saveDataForDate = (date) => {
-                const newLog = {
-                    activities: {},
-                    observations: observationsText.value
-                };
+            try {
+                // Using onSnapshot for real-time updates for the current day
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/dailyLogs`, date);
+                onSnapshot(docRef, (docSnap) => {
+                    const log = docSnap.exists() ? docSnap.data() : {};
+                    const activityData = log.activities || {};
 
-                activities.forEach(activity => {
-                    const checkbox = document.getElementById(`activity-check-${activity.id}`);
-                    const textarea = document.getElementById(`activity-desc-${activity.id}`);
-                    newLog.activities[activity.id] = {
-                        checked: checkbox.checked,
-                        description: textarea.value
-                    };
+                    activities.forEach(activity => {
+                        const checkbox = document.getElementById(`activity-check-${activity.id}`);
+                        const textarea = document.getElementById(`activity-desc-${activity.id}`);
+                        const data = activityData[activity.id] || { checked: false, description: '' };
+                        
+                        checkbox.checked = data.checked;
+                        textarea.value = data.description;
+                        textarea.disabled = !data.checked;
+                    });
+                    observationsText.value = log.observations || '';
+                    hideLoading();
+                }, (error) => {
+                    console.error("Error fetching document from Firestore:", error);
+                    alert("Error al cargar los datos. Verifique su conexión o las reglas de seguridad de Firestore.");
+                    hideLoading();
                 });
+            } catch (error) {
+                console.error("Error setting up Firestore listener:", error);
+                alert("Error al cargar los datos. Verifique su conexión o las reglas de seguridad de Firestore.");
+                hideLoading();
+            }
+        };
 
-                dailyLogs[date] = newLog;
-                localStorage.setItem('dailyLogs', JSON.stringify(dailyLogs));
-                alert('Datos guardados exitosamente para el ' + date);
-                renderChart();
+        const saveDataForDate = async (date) => {
+            showLoading();
+            const newLog = {
+                activities: {},
+                observations: observationsText.value,
+                timestamp: new Date() // Add a timestamp for better data management
             };
 
-            const renderChart = () => {
-                const ctx = document.getElementById('activityChart').getContext('2d');
-                const labels = activities.map(a => a.title);
-                const dataCounts = Array(activities.length).fill(0);
+            activities.forEach(activity => {
+                const checkbox = document.getElementById(`activity-check-${activity.id}`);
+                const textarea = document.getElementById(`activity-desc-${activity.id}`);
+                newLog.activities[activity.id] = {
+                    checked: checkbox.checked,
+                    description: textarea.value
+                };
+            });
 
-                const thirtyDaysAgo = new Date();
-                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            if (!db || !userId || !appId) {
+                console.warn("Firestore not initialized or userId/appId missing. Saving to localStorage.");
+                let localDailyLogs = JSON.parse(localStorage.getItem('dailyLogs')) || {};
+                localDailyLogs[date] = newLog;
+                localStorage.setItem('dailyLogs', JSON.stringify(localDailyLogs));
+                alert('Datos guardados exitosamente en el navegador para el ' + date);
+                renderChart();
+                hideLoading();
+                return;
+            }
 
-                Object.keys(dailyLogs).forEach(dateStr => {
+            try {
+                // Save data to Firestore
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/dailyLogs`, date);
+                await setDoc(docRef, newLog, { merge: true }); // Use merge to avoid overwriting other fields if any
+                alert('Datos guardados exitosamente en la nube para el ' + date);
+                renderChart(); // Re-render chart after saving
+            } catch (error) {
+                console.error("Error saving document to Firestore:", error);
+                alert("Error al guardar los datos. Verifique su conexión o las reglas de seguridad de Firestore.");
+            } finally {
+                hideLoading();
+            }
+        };
+
+        const renderChart = async () => {
+            const ctx = document.getElementById('activityChart').getContext('2d');
+            const labels = activities.map(a => a.title);
+            const dataCounts = Array(activities.length).fill(0);
+
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+            if (!db || !userId || !appId) {
+                console.warn("Firestore not initialized or userId/appId missing. Chart data from localStorage.");
+                const localDailyLogs = JSON.parse(localStorage.getItem('dailyLogs')) || {};
+                Object.keys(localDailyLogs).forEach(dateStr => {
                     const logDate = new Date(dateStr);
                     if (logDate >= thirtyDaysAgo) {
-                        const log = dailyLogs[dateStr];
+                        const log = localDailyLogs[dateStr];
                         if (log.activities) {
                             Object.keys(log.activities).forEach(activityId => {
                                 if (log.activities[activityId].checked) {
@@ -238,141 +403,191 @@
                         }
                     }
                 });
-
-                if (activityChart) {
-                    activityChart.destroy();
-                }
-
-                activityChart = new Chart(ctx, {
-                    type: 'bar',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: 'Días trabajados (últimos 30)',
-                            data: dataCounts,
-                            backgroundColor: 'rgba(59, 130, 246, 0.5)',
-                            borderColor: 'rgba(59, 130, 246, 1)',
-                            borderWidth: 1
-                        }]
-                    },
-                    options: {
-                        indexAxis: 'y',
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            x: {
-                                beginAtZero: true,
-                                ticks: {
-                                    stepSize: 1
-                                }
-                            }
-                        },
-                        plugins: {
-                            legend: {
-                                display: false
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        return ` Días trabajados: ${context.raw}`;
+            } else {
+                showLoading();
+                try {
+                    const logsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/dailyLogs`);
+                    // Note: Firestore does not support range queries on different fields.
+                    // We fetch all and filter in memory for simplicity and to avoid index issues.
+                    const querySnapshot = await getDocs(logsCollectionRef); // getDocs is imported from firebase/firestore
+                    querySnapshot.forEach(docSnap => {
+                        const logDateStr = docSnap.id; // Document ID is the date string
+                        const logDate = new Date(logDateStr);
+                        if (logDate >= thirtyDaysAgo) {
+                            const log = docSnap.data();
+                            if (log.activities) {
+                                Object.keys(log.activities).forEach(activityId => {
+                                    if (log.activities[activityId].checked) {
+                                        const index = activities.findIndex(a => a.id == activityId);
+                                        if (index !== -1) {
+                                            dataCounts[index]++;
+                                        }
                                     }
+                                });
+                            }
+                        }
+                    });
+                } catch (error) {
+                    console.error("Error fetching chart data from Firestore:", error);
+                    alert("Error al cargar los datos del gráfico. Verifique su conexión.");
+                } finally {
+                    hideLoading();
+                }
+            }
+
+            if (activityChart) {
+                activityChart.destroy();
+            }
+
+            activityChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Días trabajados (últimos 30)',
+                        data: dataCounts,
+                        backgroundColor: 'rgba(59, 130, 246, 0.5)',
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            ticks: {
+                                stepSize: 1
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return ` Días trabajados: ${context.raw}`;
                                 }
                             }
                         }
                     }
-                });
-            };
-
-            const generateReport = () => {
-                const date = reportDateInput.value;
-                const log = dailyLogs[date];
-
-                if (!log || Object.keys(log.activities).length === 0) {
-                    alert('No hay datos guardados para la fecha seleccionada.');
-                    return;
-                }
-
-                let reportHTML = `
-                    <h3 class="text-xl font-semibold">Informe del ${date}</h3>
-                    <p><strong>Contratista:</strong> [Nombre del Contratista]</p>
-                    <hr class="my-4">
-                    <h4 class="text-lg font-semibold mt-6 mb-2">Actividades Realizadas</h4>
-                `;
-
-                let activityFound = false;
-                activities.forEach(activity => {
-                    const activityLog = log.activities[activity.id];
-                    if (activityLog && activityLog.checked) {
-                        activityFound = true;
-                        reportHTML += `
-                            <div class="mt-4">
-                                <p><strong>${activity.title}:</strong></p>
-                                <p class="pl-4 text-slate-700">${activityLog.description || 'No se proporcionaron detalles.'}</p>
-                            </div>
-                        `;
-                    }
-                });
-                
-                if (!activityFound) {
-                     reportHTML += `<p>No se registraron actividades específicas para este día.</p>`;
-                }
-
-                if (log.observations) {
-                    reportHTML += `
-                        <h4 class="text-lg font-semibold mt-6 mb-2">Observaciones / Novedades</h4>
-                        <p class="text-slate-700">${log.observations}</p>
-                    `;
-                }
-                
-                modalBody.innerHTML = reportHTML;
-                openModal();
-            };
-            
-            const openModal = () => {
-                modal.classList.remove('opacity-0', 'pointer-events-none');
-                modal.querySelector('.modal-content').classList.remove('scale-95');
-            };
-
-            const closeModal = () => {
-                modal.classList.add('opacity-0', 'pointer-events-none');
-                 modal.querySelector('.modal-content').classList.add('scale-95');
-            };
-
-            const printReport = () => {
-                const reportContent = modalBody.innerHTML;
-                const printWindow = window.open('', '_blank');
-                printWindow.document.write(`
-                    <html>
-                        <head>
-                            <title>Informe de Actividades - ${reportDateInput.value}</title>
-                            <style>
-                                body { font-family: sans-serif; line-height: 1.5; }
-                                h3, h4 { margin-bottom: 0.5rem; }
-                                p { margin-top: 0; }
-                                hr { border: 0; border-top: 1px solid #ccc; margin: 1rem 0; }
-                                .pl-4 { padding-left: 1rem; }
-                            </style>
-                        </head>
-                        <body>${reportContent}</body>
-                    </html>
-                `);
-                printWindow.document.close();
-                printWindow.print();
-            };
-
-            reportDateInput.addEventListener('change', (e) => loadDataForDate(e.target.value));
-            saveButton.addEventListener('click', () => saveDataForDate(reportDateInput.value));
-            generateReportButton.addEventListener('click', generateReport);
-            closeModalButton.addEventListener('click', closeModal);
-            printReportButton.addEventListener('click', printReport);
-            modal.addEventListener('click', (e) => {
-                if (e.target === modal) {
-                    closeModal();
                 }
             });
+        };
 
-            initializeApp();
+        const generateReport = async () => {
+            showLoading();
+            const date = reportDateInput.value;
+            let log = {};
+
+            if (!db || !userId || !appId) {
+                console.warn("Firestore not initialized. Generating report from localStorage.");
+                log = JSON.parse(localStorage.getItem('dailyLogs'))?.[date] || {};
+            } else {
+                try {
+                    const docRef = doc(db, `artifacts/${appId}/users/${userId}/dailyLogs`, date);
+                    const docSnap = await getDoc(docRef);
+                    log = docSnap.exists() ? docSnap.data() : {};
+                } catch (error) {
+                    console.error("Error fetching report data from Firestore:", error);
+                    alert("Error al generar el informe. Verifique su conexión.");
+                    hideLoading();
+                    return;
+                }
+            }
+
+            if (!log || Object.keys(log.activities || {}).length === 0) {
+                alert('No hay datos guardados para la fecha seleccionada.');
+                hideLoading();
+                return;
+            }
+
+            let reportHTML = `
+                <h3 class="text-xl font-semibold">Informe del ${date}</h3>
+                <p><strong>Contratista:</strong> [Nombre del Contratista]</p>
+                <hr class="my-4">
+                <h4 class="text-lg font-semibold mt-6 mb-2">Actividades Realizadas</h4>
+            `;
+
+            let activityFound = false;
+            activities.forEach(activity => {
+                const activityLog = log.activities[activity.id];
+                if (activityLog && activityLog.checked) {
+                    activityFound = true;
+                    reportHTML += `
+                        <div class="mt-4">
+                            <p><strong>${activity.title}:</strong></p>
+                            <p class="pl-4 text-slate-700">${activityLog.description || 'No se proporcionaron detalles.'}</p>
+                        </div>
+                    `;
+                }
+            });
+            
+            if (!activityFound) {
+                 reportHTML += `<p>No se registraron actividades específicas para este día.</p>`;
+            }
+
+            if (log.observations) {
+                reportHTML += `
+                    <h4 class="text-lg font-semibold mt-6 mb-2">Observaciones / Novedades</h4>
+                    <p class="text-slate-700">${log.observations}</p>
+                `;
+            }
+            
+            modalBody.innerHTML = reportHTML;
+            openModal();
+            hideLoading();
+        };
+        
+        const openModal = () => {
+            modal.classList.remove('opacity-0', 'pointer-events-none');
+            modal.querySelector('.modal-content').classList.remove('scale-95');
+        };
+
+        const closeModal = () => {
+            modal.classList.add('opacity-0', 'pointer-events-none');
+             modal.querySelector('.modal-content').classList.add('scale-95');
+        };
+
+        const printReport = () => {
+            const reportContent = modalBody.innerHTML;
+            const printWindow = window.open('', '_blank');
+            printWindow.document.write(`
+                <html>
+                    <head>
+                        <title>Informe de Actividades - ${reportDateInput.value}</title>
+                        <style>
+                            body { font-family: sans-serif; line-height: 1.5; }
+                            h3, h4 { margin-bottom: 0.5rem; }
+                            p { margin-top: 0; }
+                            hr { border: 0; border-top: 1px solid #ccc; margin: 1rem 0; }
+                            .pl-4 { padding-left: 1rem; }
+                        </style>
+                    </head>
+                    <body>${reportContent}</body>
+                </html>
+            `);
+            printWindow.document.close();
+            printWindow.print();
+        };
+
+        reportDateInput.addEventListener('change', (e) => loadDataForDate(e.target.value));
+        saveButton.addEventListener('click', () => saveDataForDate(reportDateInput.value));
+        generateReportButton.addEventListener('click', generateReport);
+        closeModalButton.addEventListener('click', closeModal);
+        printReportButton.addEventListener('click', printReport);
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                closeModal();
+            }
         });
+
+        // Listen for the custom event indicating Firebase is ready
+        document.addEventListener('firebaseReady', initializeApp);
     </script>
 </body>
 </html>
